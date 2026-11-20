@@ -1,0 +1,22 @@
+{
+  "destination": "/Users/mc/Desktop/新圈数据分析/推广数据",
+  "historyDirName": "历史",
+  "projectDir": "/Users/mc/Documents/新圈数据分析",
+  "codexBin": "/Applications/ChatGPT.app/Contents/Resources/codex-cli/bin/codex",
+  "codexEnabled": true,
+  "codexReasoningEffort": "medium",
+  "codexTimeoutMinutes": 45,
+  "maxCodexAttemptsPerDay": 2,
+  "excludeNamePatterns": ["百度", "关键词"],
+  "required": ["新圈-小米-日报", "私圈-小米-日报", "新圈商店  日报", "华为"],
+  "email": {
+    "enabled": true,
+    "imapHost": "imap.163.com",
+    "imapPort": 993,
+    "user": "tantanqu2356@163.com",
+    "authCode": "<REDACTED — 填 163 邮箱客户端授权码，实际值只在本地 config.json，不提交到仓库>",
+    "senderContains": "qimai.cn",
+    "subjectContains": "七麦ASA",
+    "canonicalName": "私圈-苹果-日报.xlsx"
+  }
+}
