@@ -1,2 +1,2 @@
-# superagent-sandbox
+# Superagent sandbox
 dsh-superagent trial sandbox
