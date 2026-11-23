@@ -1,0 +1,108 @@
+From c154268569ae5b24179cfb5b32efdb19ebddd8ee Mon Sep 17 00:00:00 2001
+From: as845320774-lab <306055559+as845320774-lab@users.noreply.github.com>
+Date: Mon, 23 Nov 2026 10:31:44 +0800
+Subject: [PATCH] Default worker sessions to low reasoning effort to cut task
+ latency
+
+Worker turns are routine tool work that runs many rounds per ticket, so
+paying the deployment default (high) on every round is wasted latency.
+DSH's model catalog marks low as 'Prefer for routine or latency-sensitive
+tasks'. The orchestrator keeps the deployment default for its
+quality-critical assessment; executor.model still overrides the worker.
+---
+ docs/006-deployment.md    |  2 ++
+ src/app/role-models.ts    | 24 ++++++++++++++++++++++--
+ src/app/sessions.ts       |  5 +++--
+ tests/role-models.spec.ts |  6 ++++++
+ 4 files changed, 33 insertions(+), 4 deletions(-)
+
+diff --git a/docs/006-deployment.md b/docs/006-deployment.md
+index d4e810f..f8fb3a1 100644
+--- a/docs/006-deployment.md
++++ b/docs/006-deployment.md
+@@ -204,6 +204,8 @@ The blocks:
+ - `eval`: `mode`, `timeoutSeconds` and `model`.
+ - `executor`: `model`, `maxWorkers`, `directory`, `prepare` and `blockedCommands`. The processing pause is a setting of its own, `paused`, which `POST executor/pause` sets.
+ 
++A role without a configured `model` uses the profile's default model. The worker is the exception: when `executor.model` is unset, its Session keeps the default route but runs at `low` reasoning effort, because worker turns are routine tool work and DSH's model catalog marks `low` as "Prefer for routine or latency-sensitive tasks". The orchestrator (`eval.model`) keeps the profile default. Set `executor.model` with an explicit `reasoningEffort` to override the worker's default.
++
+ Changing a repository or CLI runs the corresponding setup check first. A failed check returns 400 with details in `setup`. A successful account change, or any save while setup is pending, returns `restarting: true`. The API is temporarily unavailable while the application restarts.
+ 
+ ```sh
+diff --git a/src/app/role-models.ts b/src/app/role-models.ts
+index 5b01e6b..1123746 100644
+--- a/src/app/role-models.ts
++++ b/src/app/role-models.ts
+@@ -11,10 +11,30 @@ export async function resolveRoleModel(ctx: Context, model: RoleModel): Promise<
+   return { provider: value.provider, model: value.model, ...(value.reasoningEffort ? { reasoningEffort: value.reasoningEffort } : {}) }
+ }
+ 
++/**
++ * Reasoning effort a worker Session defaults to when no executor model is configured. Worker turns are routine tool work,
++ * and DSH's model catalog describes `low` as "Prefer for routine or latency-sensitive tasks", so paying the deployment
++ * default (`high`) on every round of a long task is wasted latency. The orchestrator keeps the deployment default for its
++ * quality-critical assessment. Configure `executor.model` to override this default for the worker.
++ */
++export const WORKER_DEFAULT_REASONING_EFFORT = 'low'
++
+ /** Seed a role's configured model onto a brand-new session before its first request, leaving later manual or durable selections intact. */
+-export async function initializeRoleModel(ctx: Context, agent: Agent, model: RoleModel | null): Promise<void> {
+-  if (!model) return
++export async function initializeRoleModel(ctx: Context, agent: Agent, model: RoleModel | null, defaultReasoningEffort?: string): Promise<void> {
+   if (agent.session.requestHeader() || agent.session.snapshotEvents().some(event => event.type === 'model/selection')) return
++  if (!model) {
++    // No per-role model: keep the deployment's default route and only tune the reasoning effort for a latency-sensitive role.
++    if (!defaultReasoningEffort) return
++    const effort = ReasoningEffortId(defaultReasoningEffort)
++    agent.ctx.effect(() => {
++      const dispose = agent.ctx.on('agent/request', async (_payload, next) => {
++        const result = await next()
++        return { ...result, reasoningEffort: effort }
++      }, { prepend: true })
++      return () => dispose()
++    })
++    return
++  }
+   const selected = await resolveRoleModel(ctx, model)
+   // Avoid selectModel because it mutates the global DSH default; inject the selection for the initial request only.
+   agent.session.append('model/selection', selected)
+diff --git a/src/app/sessions.ts b/src/app/sessions.ts
+index 1a22388..c47596b 100644
+--- a/src/app/sessions.ts
++++ b/src/app/sessions.ts
+@@ -13,7 +13,7 @@ import { AgentDelivery, messageId } from './delivery.ts'
+ import type { Effects } from './effects.ts'
+ import type { Variable } from './execution-environment.ts'
+ import { RetryHealth } from './retry-health.ts'
+-import { initializeRoleModel } from './role-models.ts'
++import { initializeRoleModel, WORKER_DEFAULT_REASONING_EFFORT } from './role-models.ts'
+ import { bundledSkills } from './skill-files.ts'
+ import { SKILL_PREFIX, type PromptVersion, type Prompts } from './prompts.ts'
+ import type { Store } from './store.ts'
+@@ -147,7 +147,8 @@ export class Sessions {
+     }
+     if ('error' in result) throw result.error
+     const settings = this.host.store.settings()
+-    await initializeRoleModel(ctx, result.agent, role === 'orchestrator' ? settings.eval.model : settings.executor.model)
++    await initializeRoleModel(ctx, result.agent, role === 'orchestrator' ? settings.eval.model : settings.executor.model,
++      role === 'worker' ? WORKER_DEFAULT_REASONING_EFFORT : undefined)
+     await this.decorate(result.agent)
+     ctx.permissionPresets.set(result.agent.session, 'danger-full-access')
+     await ctx.sessionController.rename({ sessionId: id as SessionId, title })
+diff --git a/tests/role-models.spec.ts b/tests/role-models.spec.ts
+index 1be1405..1360271 100644
+--- a/tests/role-models.spec.ts
++++ b/tests/role-models.spec.ts
+@@ -63,3 +63,9 @@ it('inherits the host when unset and fails unavailable routes before recording a
+   await expect(initializeRoleModel(ctx, agent, { provider: 'unknown', model: 'x' })).rejects.toThrow('unknown provider')
+   expect(agent.session.snapshotEvents().some(event => event.type === 'model/selection')).toBe(false)
+ })
++it('tunes only the reasoning effort when no role model is set', async () => {
++  const { ctx, agent, request } = await fixture()
++  await initializeRoleModel(ctx, agent, null, 'low')
++  await ctx.systemPrompt.assemble()
++  expect(await request()).toMatchObject({ provider: 'host', model: 'default', reasoningEffort: ReasoningEffortId('low') })
++})
+-- 
+2.50.1 (Apple Git-155)
+
